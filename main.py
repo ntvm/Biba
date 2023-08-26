@@ -1,4 +1,7 @@
-from EdgeGPT import Chatbot
+
+
+
+from EdgeGPT.EdgeGPT import Chatbot
 from aiohttp import web
 import time
 import random
@@ -10,24 +13,23 @@ import tiktoken
 import config
 import requests
 import aiohttp
-import signal
 from urllib.parse import urlparse
-
+ 
 PORT = config.PORT
 HOST = config.HOST
-
+ 
 CONCATENATE_RESPONSES = config.CONCATENATE_RESPONSES
 CONCATENATE_RESPONSES_STRING = config.CONCATENATE_RESPONSES_STRING
 DESIRED_TOKENS = config.DESIRED_TOKENS
 CONTINUATION_QUERY = config.CONTINUATION_QUERY
-
+ 
 MARKUP_FIX = config.MARKUP_FIX
-
+ 
 COOKIE_NAME = config.COOKIE_NAME
-
+ 
 USER_MESSAGE_WORKAROUND = config.USER_MESSAGE_WORKAROUND
 USER_MESSAGE = config.USER_MESSAGE
-
+ 
 REDIRECT_PROXY = config.REDIRECT_PROXY
 REDIRECT_API_KEY = config.REDIRECT_API_KEY
 REDIRECT_API_MODEL = config.REDIRECT_API_MODEL
@@ -35,12 +37,12 @@ REDIRECT_COMMAND = config.REDIRECT_COMMAND
 REDIRECT_TEMPERATURE = config.REDIRECT_TEMPERATURE
 REDIRECT_USE_CONTEXT = config.REDIRECT_USE_CONTEXT
 REDIRECT_CONTEXT_TOKENS = config.REDIRECT_CONTEXT_TOKENS
-
+ 
 try:
     cookies = json.loads(open(f"./{COOKIE_NAME}", encoding="utf-8").read())
 except:
     cookies = None
-
+ 
 class LinkPlaceholderReplacer:
     def __init__(self):
         self.placeholder_wrap = ""
@@ -48,14 +50,14 @@ class LinkPlaceholderReplacer:
         self.urls = []
         self.stash = ""
         self.regex = r'\^(\d+)\^'
-
+ 
     def process(self, content, urls):
-
+ 
         if "[" not in content and self.i == 0:
             return content
-
+ 
         self.stash += content
-
+ 
         if "[" in content:
             self.i = 1
             return ""
@@ -74,8 +76,8 @@ class LinkPlaceholderReplacer:
             return result
         
         self.stash = ""
-
-
+ 
+ 
 class OpenaiResponse:
     def __init__(self, id, created, end=False, content="", stream=True):
         self.id = id
@@ -83,7 +85,7 @@ class OpenaiResponse:
         self.end = end
         self.content = content
         self.stream = stream
-
+ 
     def dict(self):
         if self.stream:
             data = {
@@ -118,17 +120,17 @@ class OpenaiResponse:
                 }]
             }
             return data
-
-
+ 
+ 
 def transform_into_hyperlink(match, urls):
     index = int(match.group(1)) - 1
     return f" [{urlparse(urls[index]).hostname}]({urls[index]})"
-
-
+ 
+ 
 def prepare_response(id, created, filter=False, content="", end=False, done=False, stream=True):
-
+ 
     response = b""
-
+ 
     if stream:
         if filter:
             OAIResponse = OpenaiResponse(id, created, content="Отфильтровано.", stream=stream)
@@ -143,25 +145,25 @@ def prepare_response(id, created, filter=False, content="", end=False, done=Fals
             response += b"data: " + b"[DONE]" + b"\n\n"
     else:
         response = json.dumps(OpenaiResponse(id, created, content=content, stream=stream).dict()).encode()
-
+ 
     return response
-
-
+ 
+ 
 def transform_message(message):
     role = message["role"]
     content = message["content"]
     anchor = "#additional_instructions" if role == "system" else "#message"
     return f"[{role}]({anchor})\n{content}\n\n"
-
-
+ 
+ 
 def process_messages(messages):
     transformed_messages = [transform_message(message) for message in messages]
     return "".join(transformed_messages)+"\n"
-
-
+ 
+ 
 class SSEHandler(web.View):
-
-
+ 
+ 
     async def get(self):
         data = {
                    "object": "list",
@@ -177,17 +179,17 @@ class SSEHandler(web.View):
                        }
                    ]
                }
-
+ 
         return web.json_response(data)
-
+ 
     async def post(self):
-
+ 
         self.id = "chatcmpl-" + ''.join(random.choices(string.ascii_letters + string.digits, k=29))
         self.created = str(int(time.time()))
         self.responseWasFiltered = False
         self.responseWasFilteredInLoop = False
         self.fullResponse = ""
-
+ 
         async def streamCallback(self, data):
             self.fullResponse += data
             if stream and not redirect:
@@ -204,9 +206,9 @@ class SSEHandler(web.View):
                         }
                     ]
                 }).encode() + b"\n\n")
-
+ 
         request_data = await self.request.json()
-
+ 
         messages = request_data.get('messages', [])
         if USER_MESSAGE_WORKAROUND:
             prompt = USER_MESSAGE
@@ -222,46 +224,41 @@ class SSEHandler(web.View):
             }
         )
         await self.response.prepare(self.request)
-
-        redirect = suggestion = False
-        path_list = self.request.path.split('/')
-        
-        if path_list[1] not in ["creative", "balanced", "precise"]:
+ 
+ 
+        conversation_style = self.request.path.split('/')[1]
+        if conversation_style not in ["creative", "balanced", "precise"]:
             conversation_style = "creative"
-        else: conversation_style = path_list[1]
-
-        if "suggestion" in path_list[:2]:
-            suggestion = True
-            
-        if "redirect" in path_list[:3]:
+ 
+        if self.request.path.split('/')[1] == "suggestion":
             redirect = True
-
+ 
+        if self.request.path.split('/')[2] == "suggestion":
+            suggestion = True
+        else:
+            suggestion = False
+ 
+        if self.request.path.split('/')[2] == "redirect":
+            redirect = True
+        else:
+            redirect = False
+ 
         async def output(self, streamCallback, nsfwMode=False):
             self.responseText = ""
-
+ 
             try:
                 chatbot = await Chatbot.create(cookies=cookies)
             except Exception as e:
-                bingError = str(e)
                 if str(e) == "[Errno 11001] getaddrinfo failed":
-                    logError = "Нет интернет-соединения: " + bingError
-                elif str(e) == "Authentication failed":
-                    logError = "Ошибка аутентификации. Возможно стоит включить VPN: " + bingError
-                else: logError = "Ошибка:", bingError
-                print(logError)
-
-                if stream:
-                    oai_response = prepare_response(self.id, self.created, content=logError, end=True, done=True, stream=True)
-                else:
-                    oai_response = prepare_response(self.id, self.created, content=logError, stream=False)
-                await self.response.write(oai_response)
-
-                return self.response
+                    print("Нет интернет-соединения.")
+                    return
+                print("Ошибка запуска чатбота.", str(e))
+                return
             
-            print("\nОжидание ответа от сервера...")
+            print("\nФормируется запрос...")
             link_placeholder_replacer = LinkPlaceholderReplacer()
             wrote = 0
-
+ 
             async for final, response in chatbot.ask_stream(
                     prompt=prompt,
                     raw=True,
@@ -269,7 +266,7 @@ class SSEHandler(web.View):
                     conversation_style=conversation_style,
                     search_result=True,
             ):
-
+ 
                 if not final and response["type"] == 1 and "messages" in response["arguments"][0]:
                     message = response["arguments"][0]["messages"][0]
                     match message.get("messageType"):
@@ -279,15 +276,19 @@ class SSEHandler(web.View):
                             if 'hiddenText' in message:
                                 search = message['hiddenText'] = message['hiddenText'][len("```json\n"):]
                                 search = search[:-len("```")]
-                                search = json.loads(search)
+                                print(f"search: {search}")
                                 urls = []
-                                if "question_answering_results" in search:
-                                    for result in search["question_answering_results"]:
-                                        urls.append(result["url"])
-
-                                if "web_search_results" in search:
-                                    for result in search["web_search_results"]:
-                                        urls.append(result["url"])
+                                try:
+                                    search = json.loads(search)
+                                    urls = []
+                                    if "question_answering_results" in search:
+                                        for result in search["question_answering_results"]:
+                                            urls.append(result["url"])
+                                    if "web_search_results" in search:
+                                        for result in search["web_search_results"]:
+                                            urls.append(result["url"])
+                                except json.JSONDecodeError as e:
+                                    print(f"Error decoding JSON: {e}")
                         case None:
                             if "cursor" in response["arguments"][0]:
                                 print("\nОтвет от сервера:\n")
@@ -297,7 +298,7 @@ class SSEHandler(web.View):
                                     if nsfwMode:
                                         self.responseWasFilteredInLoop = True
                                     break
-
+ 
                                 if MARKUP_FIX:
                                     if self.responseText.count("*") % 2 == 1 or self.responseText.count("*") == 1:
                                         await streamCallback(self, "*")
@@ -305,28 +306,28 @@ class SSEHandler(web.View):
                                     if self.responseText.count("\"") % 2 == 1 or self.responseText.count("\"") == 1:
                                         await streamCallback(self, "\"")
                                         self.responseText += "\""
-
+ 
                                 self.responseWasFiltered = True
-
+ 
                                 print("\nОтвет отозван во время стрима.")
                                 break
                             else:
                                 streaming_content_chunk = message['text'][wrote:]
                                 streaming_content_chunk = streaming_content_chunk.replace('\\"', '\"')
-
-
+ 
+ 
                                 if 'urls' in vars():
                                     if urls:
                                         streaming_content_chunk = link_placeholder_replacer.process(streaming_content_chunk, urls)
-
+ 
                                 self.responseText += streaming_content_chunk
-
+ 
                                 await streamCallback(self, streaming_content_chunk)
-
+ 
                                 print(message["text"][wrote:], end="")
                                 sys.stdout.flush()
                                 wrote = len(message["text"])
-
+ 
                                 if "suggestedResponses" in message:
                                     suggested_responses = '\n'.join(x["text"] for x in message["suggestedResponses"])
                                     suggested_responses = "\n```" + suggested_responses + "```"
@@ -338,10 +339,9 @@ class SSEHandler(web.View):
                     if nsfwMode:
                         print("Выходим из цикла.\n")
                         self.responseWasFilteredInLoop = True
-                    break
-
+ 
             await chatbot.close()
-
+ 
             
             
         try:
@@ -490,14 +490,14 @@ class SSEHandler(web.View):
                     oai_response = prepare_response(self.id, self.created, content=self.fullResponse, stream=False)
             await self.response.write(oai_response)
         return self.response        
-
-
-
+ 
+ 
+ 
 app = web.Application()
 app.router.add_routes([
     web.route('*', '/{tail:.*}', SSEHandler),
 ])
-
+ 
 if __name__ == '__main__':
     print(f"Есть несколько режимов (разнятся температурой):\n"
           f"По дефолту стоит creative: http://{HOST}:{PORT}/\n"
